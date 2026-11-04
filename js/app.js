@@ -14,11 +14,32 @@
     activeTab: 'tabCart',
     selectedCategory: 'ALL',
     searchQuery: '',
-    editingItemId: null
+    editingItemId: null,
+    isSyncingFromRemote: false
   };
 
   // DOM Elements Cache
   const DOM = {
+    // Cloud Sync & Multi-Device
+    cloudSyncStatusBadge: document.getElementById('cloudSyncStatusBadge'),
+    cloudSyncDot: document.getElementById('cloudSyncDot'),
+    cloudSyncText: document.getElementById('cloudSyncText'),
+    cloudDeviceBadge: document.getElementById('cloudDeviceBadge'),
+    btnEditStoreSession: document.getElementById('btnEditStoreSession'),
+    headerStoreLocation: document.getElementById('headerStoreLocation'),
+    headerShoppingDate: document.getElementById('headerShoppingDate'),
+    inputStoreLocation: document.getElementById('inputStoreLocation'),
+    inputShoppingDate: document.getElementById('inputShoppingDate'),
+
+    // Modal Store Session
+    modalStoreSession: document.getElementById('modalStoreSession'),
+    modalStoreSessionBackdrop: document.getElementById('modalStoreSessionBackdrop'),
+    btnCloseStoreModal: document.getElementById('btnCloseStoreModal'),
+    btnCancelStoreModal: document.getElementById('btnCancelStoreModal'),
+    btnSaveStoreModal: document.getElementById('btnSaveStoreModal'),
+    modalStoreLocationInput: document.getElementById('modalStoreLocationInput'),
+    modalShoppingDateInput: document.getElementById('modalShoppingDateInput'),
+
     // Header & Safety Cap
     headerCartTotal: document.getElementById('headerCartTotal'),
     safetyCapWidget: document.getElementById('safetyCapWidget'),
@@ -187,14 +208,24 @@
 
   /**
    * Inisialisasi Aplikasi
+   * Mengutamakan LocalStorage untuk fallback 0ms / tahan F5 saat offline,
+   * lalu mengaktifkan listener realtime Cloud Firestore onSnapshot().
    */
   function init() {
-    state.cart = window.GroceryStorage.getCurrentCart();
+    // 1. Muat data aktif dari LocalStorage (Fallback Instan)
+    const active = window.GroceryStorage.getActiveSession();
+    state.cart = active.items || [];
     state.settings = window.GroceryStorage.getSettings();
+    state.settings.budgetCap = active.walletLimit;
+    state.settings.storeLocation = active.storeLocation;
+    state.settings.shoppingDate = active.shoppingDate;
     state.sessions = window.GroceryStorage.getPastSessions();
 
     bindEvents();
     renderAll();
+
+    // 2. Setup Multi-Device Realtime Cloud Sync via onSnapshot()
+    setupFirebaseSync();
 
     // Check URL queries (misal shortcut PWA ?tab=budget)
     const urlParams = new URLSearchParams(window.location.search);
@@ -206,6 +237,115 @@
     }
     if (urlParams.get('action') === 'add') {
       openItemModal();
+    }
+  }
+
+  /**
+   * Hubungkan ke engine FirebaseSync
+   */
+  function setupFirebaseSync() {
+    const startSync = () => {
+      if (!window.FirebaseSync) return;
+      window.FirebaseSync.init({
+        onRemoteData: handleRemoteDataSnapshot,
+        onStatusChange: handleSyncStatusChange,
+        onEmptyCloud: handleEmptyCloudSeed
+      });
+    };
+
+    if (window.FirebaseSync) {
+      startSync();
+    } else {
+      window.addEventListener('FirebaseSyncReady', startSync, { once: true });
+    }
+  }
+
+  /**
+   * PENTING: Handler Realtime dari onSnapshot() Cloud Firestore
+   * Saat HP di supermarket mengubah keranjang, fungsi ini langsung terpicu di PC seketika.
+   */
+  function handleRemoteDataSnapshot(remoteData, meta) {
+    if (!remoteData) return;
+    state.isSyncingFromRemote = true;
+
+    // Update state item
+    if (Array.isArray(remoteData.items)) {
+      state.cart = remoteData.items;
+    }
+
+    // Update walletLimit (budgetCap)
+    if (remoteData.walletLimit !== undefined) {
+      state.settings.budgetCap = Number(remoteData.walletLimit) || 0;
+    }
+
+    // Update storeLocation
+    if (remoteData.storeLocation) {
+      state.settings.storeLocation = remoteData.storeLocation;
+    }
+
+    // Update shoppingDate
+    if (remoteData.shoppingDate) {
+      state.settings.shoppingDate = remoteData.shoppingDate;
+    }
+
+    if (remoteData.sessionName) {
+      state.settings.sessionName = remoteData.sessionName;
+    }
+
+    // Perbarui LocalStorage agar fallback selalu memuat data terbaru saat F5 ditekan
+    window.GroceryStorage.saveActiveSession({
+      storeLocation: state.settings.storeLocation,
+      shoppingDate: state.settings.shoppingDate,
+      walletLimit: state.settings.budgetCap,
+      items: state.cart,
+      totalSpent: remoteData.totalSpent || 0,
+      sessionName: state.settings.sessionName
+    });
+
+    // Render ulang seluruh UI tanpa reload halaman
+    renderAll();
+
+    // Notifikasi toast jika perubahan berasal dari perangkat lain (HP / PC)
+    if (meta.isFromOtherDevice) {
+      showToast(`🛒 Data ter-update realtime dari ${meta.deviceLabel}!`, 'info', 2500);
+      triggerHaptic('light');
+    }
+
+    state.isSyncingFromRemote = false;
+  }
+
+  /**
+   * Handler Status Koneksi Cloud
+   */
+  function handleSyncStatusChange(status, message, deviceLabel) {
+    if (DOM.cloudDeviceBadge && deviceLabel) {
+      DOM.cloudDeviceBadge.textContent = deviceLabel;
+    }
+
+    if (!DOM.cloudSyncDot || !DOM.cloudSyncText) return;
+
+    if (status === 'online') {
+      DOM.cloudSyncDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+      DOM.cloudSyncText.textContent = 'Multi-Device Realtime';
+      DOM.cloudSyncText.className = 'font-bold text-emerald-400 tracking-tight';
+    } else if (status === 'connecting') {
+      DOM.cloudSyncDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-ping';
+      DOM.cloudSyncText.textContent = 'Menghubungkan...';
+      DOM.cloudSyncText.className = 'font-bold text-amber-400 tracking-tight';
+    } else {
+      DOM.cloudSyncDot.className = 'w-2 h-2 rounded-full bg-rose-400';
+      DOM.cloudSyncText.textContent = 'Mode Offline (LocalStorage)';
+      DOM.cloudSyncText.className = 'font-bold text-slate-300 tracking-tight';
+    }
+  }
+
+  /**
+   * Seed data cloud pertama kali dari LocalStorage
+   */
+  function handleEmptyCloudSeed() {
+    const active = window.GroceryStorage.getActiveSession();
+    if (window.FirebaseSync && typeof window.FirebaseSync.pushSession === 'function') {
+      window.FirebaseSync.pushSession(active);
     }
   }
 
@@ -355,14 +495,49 @@
     DOM.btnCloseHistoryDetail.addEventListener('click', closeHistoryDetailModal);
     DOM.modalHistoryDetailBackdrop.addEventListener('click', closeHistoryDetailModal);
 
-    // Edit Budget Cap (F-05)
+    // Modal Edit Lokasi Toko & Tanggal Belanja
+    if (DOM.btnEditStoreSession) {
+      DOM.btnEditStoreSession.addEventListener('click', openStoreModal);
+    }
+    if (DOM.btnCloseStoreModal) {
+      DOM.btnCloseStoreModal.addEventListener('click', closeStoreModal);
+    }
+    if (DOM.btnCancelStoreModal) {
+      DOM.btnCancelStoreModal.addEventListener('click', closeStoreModal);
+    }
+    if (DOM.modalStoreSessionBackdrop) {
+      DOM.modalStoreSessionBackdrop.addEventListener('click', closeStoreModal);
+    }
+    if (DOM.btnSaveStoreModal) {
+      DOM.btnSaveStoreModal.addEventListener('click', () => {
+        state.settings.storeLocation = DOM.modalStoreLocationInput.value.trim() || 'Superindo Kaliurang';
+        state.settings.shoppingDate = DOM.modalShoppingDateInput.value || new Date().toISOString().slice(0, 10);
+        saveAndRefreshCart(true);
+        closeStoreModal();
+        showToast('Info supermarket & tanggal berhasil disinkronkan!', 'success');
+      });
+    }
+
+    // Input Lokasi Toko & Tanggal di Tab 3 (Anggaran)
+    if (DOM.inputStoreLocation) {
+      DOM.inputStoreLocation.addEventListener('change', (e) => {
+        state.settings.storeLocation = e.target.value.trim() || 'Superindo';
+        saveAndRefreshCart(true);
+      });
+    }
+    if (DOM.inputShoppingDate) {
+      DOM.inputShoppingDate.addEventListener('change', (e) => {
+        state.settings.shoppingDate = e.target.value || new Date().toISOString().slice(0, 10);
+        saveAndRefreshCart(true);
+      });
+    }
+
+    // Edit Budget Cap (F-05) - walletLimit
     DOM.inputBudgetCap.addEventListener('change', (e) => {
       const val = window.GroceryCalc.parseNumber(e.target.value);
       if (val >= 0) {
         state.settings.budgetCap = val;
-        window.GroceryStorage.saveSettings(state.settings);
-        renderBudgetWidget();
-        renderBudgetTab();
+        saveAndRefreshCart(true);
         showToast(`Batas belanja diperbarui: ${window.GroceryCalc.formatRupiah(val)}`, 'success');
       }
     });
@@ -373,9 +548,7 @@
         const amount = parseInt(btn.getAttribute('data-amount'), 10);
         state.settings.budgetCap = amount;
         DOM.inputBudgetCap.value = new Intl.NumberFormat('id-ID').format(amount);
-        window.GroceryStorage.saveSettings(state.settings);
-        renderBudgetWidget();
-        renderBudgetTab();
+        saveAndRefreshCart(true);
         triggerHaptic('light');
         showToast(`Batas belanja diset ke ${window.GroceryCalc.formatRupiah(amount)}`, 'success');
       });
@@ -482,6 +655,68 @@
     renderStickyBar();
     renderHistoryTab();
     renderBudgetTab();
+    renderStoreInfoInHeader();
+  }
+
+  /**
+   * Render informasi toko & tanggal belanja di bar header
+   */
+  function renderStoreInfoInHeader() {
+    if (DOM.headerStoreLocation) {
+      DOM.headerStoreLocation.textContent = state.settings.storeLocation || 'Superindo';
+    }
+    if (DOM.headerShoppingDate) {
+      const d = state.settings.shoppingDate || new Date().toISOString().slice(0, 10);
+      const parts = d.split('-');
+      if (parts.length === 3) {
+        DOM.headerShoppingDate.textContent = `${parts[2]}/${parts[1]}`;
+      } else {
+        DOM.headerShoppingDate.textContent = d;
+      }
+    }
+    if (DOM.inputStoreLocation) {
+      DOM.inputStoreLocation.value = state.settings.storeLocation || '';
+    }
+    if (DOM.inputShoppingDate) {
+      DOM.inputShoppingDate.value = state.settings.shoppingDate || new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  /**
+   * Buka Modal Edit Toko & Tanggal
+   */
+  function openStoreModal() {
+    if (!DOM.modalStoreSession) return;
+    DOM.modalStoreLocationInput.value = state.settings.storeLocation || 'Superindo Kaliurang';
+    DOM.modalShoppingDateInput.value = state.settings.shoppingDate || new Date().toISOString().slice(0, 10);
+
+    DOM.modalStoreSession.classList.remove('pointer-events-none', 'opacity-0');
+    DOM.modalStoreSession.classList.add('pointer-events-auto', 'opacity-100');
+    const sheet = DOM.modalStoreSession.querySelector('.bottom-sheet');
+    if (sheet) {
+      sheet.classList.remove('closed');
+      sheet.classList.add('open');
+    }
+    refreshIcons();
+    triggerHaptic('light');
+  }
+
+  /**
+   * Tutup Modal Edit Toko & Tanggal
+   */
+  function closeStoreModal() {
+    if (!DOM.modalStoreSession) return;
+    const sheet = DOM.modalStoreSession.querySelector('.bottom-sheet');
+    if (sheet) {
+      sheet.classList.remove('open');
+      sheet.classList.add('closed');
+    }
+    DOM.modalStoreSession.classList.remove('opacity-100');
+    DOM.modalStoreSession.classList.add('opacity-0');
+    setTimeout(() => {
+      DOM.modalStoreSession.classList.remove('pointer-events-auto');
+      DOM.modalStoreSession.classList.add('pointer-events-none');
+    }, 250);
   }
 
   /**
@@ -716,13 +951,44 @@
 
   /**
    * Simpan dan Render Ulang Keranjang
+   * Menyimpan ke LocalStorage (fallback instan offline / F5) dan Cloud Firestore secara realtime
    */
-  function saveAndRefreshCart() {
-    window.GroceryStorage.saveCurrentCart(state.cart);
+  function saveAndRefreshCart(syncToCloud = true) {
+    let currentTotal = 0;
+    state.cart.forEach(raw => {
+      const it = window.GroceryCalc.calculateItem(raw);
+      currentTotal += it.finalSubtotal;
+    });
+
+    // 1. Simpan ke LocalStorage agar langsung aman seketika saat F5 / offline
+    window.GroceryStorage.saveActiveSession({
+      storeLocation: state.settings.storeLocation || 'Superindo Kaliurang',
+      shoppingDate: state.settings.shoppingDate || new Date().toISOString().slice(0, 10),
+      walletLimit: state.settings.budgetCap || 400000,
+      items: state.cart,
+      totalSpent: currentTotal,
+      sessionName: state.settings.sessionName || 'Belanja Bulanan'
+    });
+
+    // 2. Render UI
     renderCartList();
     renderBudgetWidget();
     renderStickyBar();
     renderBudgetTab();
+    renderStoreInfoInHeader();
+
+    // 3. Kirim ke Cloud Firestore untuk diterima realtime onSnapshot() di perangkat lain (HP / PC)
+    if (syncToCloud && !state.isSyncingFromRemote && window.FirebaseSync && typeof window.FirebaseSync.pushSession === 'function') {
+      window.FirebaseSync.pushSession({
+        storeLocation: state.settings.storeLocation || 'Superindo Kaliurang',
+        shoppingDate: state.settings.shoppingDate || new Date().toISOString().slice(0, 10),
+        walletLimit: state.settings.budgetCap || 400000,
+        items: state.cart,
+        totalSpent: currentTotal,
+        sessionName: state.settings.sessionName || 'Belanja Bulanan',
+        status: 'active'
+      });
+    }
   }
 
   /**
@@ -1188,8 +1454,14 @@
 
     try {
       const newSession = window.GroceryStorage.saveCurrentAsSession(name, note);
+      
+      // Sinkronkan juga riwayat belanja ke Cloud Firestore
+      if (window.FirebaseSync && typeof window.FirebaseSync.pushHistory === 'function') {
+        window.FirebaseSync.pushHistory(newSession);
+      }
+
       closeSaveSessionModal();
-      showToast(`Transaksi "${newSession.name}" resmi tersimpan di Riwayat!`, 'success');
+      showToast(`Transaksi "${newSession.name}" resmi tersimpan di Riwayat & Cloud!`, 'success');
       switchTab('tabHistory');
     } catch (e) {
       showToast(e.message || 'Gagal menyimpan riwayat.', 'danger');

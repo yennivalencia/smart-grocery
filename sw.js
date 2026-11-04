@@ -1,5 +1,5 @@
 // Service Worker for Smart Grocery & Budget Safety Tracker (PWA)
-const CACHE_NAME = 'smart-grocery-v1';
+const CACHE_NAME = 'smart-grocery-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -8,6 +8,8 @@ const ASSETS_TO_CACHE = [
   './js/app.js',
   './js/calculator.js',
   './js/storage.js',
+  './js/firebase-config.js',
+  './js/firebase-sync.js',
   './icons/icon-192.svg',
   './icons/icon-512.svg'
 ];

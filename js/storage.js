@@ -6,7 +6,8 @@
 const STORAGE_KEYS = {
   CURRENT_CART: 'smart_grocery_current_cart',
   SETTINGS: 'smart_grocery_settings',
-  PAST_SESSIONS: 'smart_grocery_sessions'
+  PAST_SESSIONS: 'smart_grocery_sessions',
+  ACTIVE_SESSION: 'smart_grocery_active_session'
 };
 
 // Data Awal Realistis (Preset Belanja Siswa Rantau)
@@ -109,13 +110,68 @@ const DEFAULT_PAST_SESSIONS = [
 ];
 
 const DEFAULT_SETTINGS = {
-  budgetCap: 400000, // Rp 400.000 batas saku anak kost
+  budgetCap: 400000, // Rp 400.000 batas saku anak kost (walletLimit)
+  storeLocation: 'Superindo Kaliurang',
+  shoppingDate: new Date().toISOString().slice(0, 10),
+  sessionName: 'Belanja Bulanan Kost',
   theme: 'dark',
   vibrationEnabled: true,
   autoSortBy: 'default' // default, category, price-desc, price-asc
 };
 
 const GroceryStorage = {
+  /**
+   * Mengambil data sesi aktif terpadu untuk sinkronisasi multi-device & LocalStorage
+   * Menyimpan variabel: storeLocation, shoppingDate, walletLimit, items, totalSpent, sessionName, status
+   */
+  getActiveSession() {
+    const cart = this.getCurrentCart();
+    const settings = this.getSettings();
+    let totalSpent = 0;
+    cart.forEach(item => {
+      const calc = window.GroceryCalc ? window.GroceryCalc.calculateItem(item) : { finalSubtotal: (item.qty || 1) * (item.unitPrice || 0) };
+      totalSpent += calc.finalSubtotal;
+    });
+
+    return {
+      storeLocation: settings.storeLocation || 'Superindo Kaliurang',
+      shoppingDate: settings.shoppingDate || new Date().toISOString().slice(0, 10),
+      walletLimit: Number(settings.budgetCap) || 400000,
+      items: cart,
+      totalSpent,
+      sessionName: settings.sessionName || 'Belanja Bulanan Kost',
+      status: 'active'
+    };
+  },
+
+  /**
+   * Menyimpan data sesi aktif terpadu ke LocalStorage
+   */
+  saveActiveSession(sessionData) {
+    if (sessionData.items && Array.isArray(sessionData.items)) {
+      this.saveCurrentCart(sessionData.items);
+    }
+    const settings = this.getSettings();
+    if (sessionData.walletLimit !== undefined) {
+      settings.budgetCap = Number(sessionData.walletLimit) || 0;
+    }
+    if (sessionData.storeLocation !== undefined) {
+      settings.storeLocation = sessionData.storeLocation;
+    }
+    if (sessionData.shoppingDate !== undefined) {
+      settings.shoppingDate = sessionData.shoppingDate;
+    }
+    if (sessionData.sessionName !== undefined) {
+      settings.sessionName = sessionData.sessionName;
+    }
+    this.saveSettings(settings);
+
+    try {
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_SESSION, JSON.stringify(sessionData));
+    } catch (e) {
+      // ignore
+    }
+  },
   /**
    * Mengambil keranjang belanja aktif
    */
@@ -233,8 +289,11 @@ const GroceryStorage = {
     const newSession = {
       id: 'session-' + Date.now(),
       name: sessionName || `Belanja ${new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(new Date())}`,
-      date: new Date().toISOString(),
+      date: settings.shoppingDate || new Date().toISOString(),
+      storeLocation: settings.storeLocation || 'Superindo Kaliurang',
+      shoppingDate: settings.shoppingDate || new Date().toISOString().slice(0, 10),
       budgetCap: settings.budgetCap,
+      walletLimit: settings.budgetCap,
       totalSpent,
       totalItems: sessionItems.length,
       items: sessionItems,
